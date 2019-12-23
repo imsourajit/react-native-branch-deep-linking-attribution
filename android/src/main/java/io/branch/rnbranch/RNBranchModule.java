@@ -8,6 +8,8 @@ import android.content.BroadcastReceiver;
 import android.net.Uri;
 import androidx.annotation.Nullable;
 import androidx.localbroadcastmanager.content.LocalBroadcastManager;
+
+import android.os.Bundle;
 import android.util.Log;
 import android.os.Handler;
 
@@ -15,6 +17,7 @@ import com.facebook.react.bridge.*;
 import com.facebook.react.bridge.Promise;
 import com.facebook.react.modules.core.*;
 import com.facebook.react.bridge.ReadableMap;
+import com.google.firebase.analytics.FirebaseAnalytics;
 
 import io.branch.referral.*;
 import io.branch.referral.Branch.BranchLinkCreateListener;
@@ -25,6 +28,7 @@ import io.branch.indexing.*;
 
 import org.json.*;
 
+import java.lang.ref.WeakReference;
 import java.text.ParseException;
 import java.text.SimpleDateFormat;
 import java.util.*;
@@ -71,12 +75,11 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
 
     private static final String IDENT_FIELD_NAME = "ident";
     public static final String UNIVERSAL_OBJECT_NOT_FOUND_ERROR_CODE = "RNBranch::Error::BUONotFound";
-    public static final String GENERIC_ERROR = "RNBranch::Error";
     private static final long AGING_HASH_TTL = 3600000;
 
     private static JSONObject initSessionResult = null;
     private BroadcastReceiver mInitSessionEventReceiver = null;
-    private static Branch.BranchUniversalReferralInitListener initListener = null;
+    private static WeakReference<Branch.BranchUniversalReferralInitListener> initListener = null;
 
     private static Activity mActivity = null;
     private static boolean mUseDebug = false;
@@ -85,44 +88,16 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
 
     private AgingHash<String, BranchUniversalObject> mUniversalObjectMap = new AgingHash<>(AGING_HASH_TTL);
 
-    private static Branch.BranchReferralInitListener referralInitListener = null;
-
-    public static void getAutoInstance(Context context) {
-        RNBranchConfig config = new RNBranchConfig(context);
-        String branchKey = config.getBranchKey();
-        String liveKey = config.getLiveKey();
-        String testKey = config.getTestKey();
-        boolean useTest = config.getUseTestInstance();
-
-        if (branchKey != null) {
-            Branch.getAutoInstance(context, branchKey);
-        }
-        else if (useTest && testKey != null) {
-            Branch.getAutoInstance(context, testKey);
-        }
-        else if (!useTest && liveKey != null) {
-            Branch.getAutoInstance(context, liveKey);
-        }
-        else {
-            Branch.getAutoInstance(context);
-        }
-    }
-
-    public static void reInitSession(Activity reactActivity) {
-        Branch branch = Branch.getInstance();
-        branch.reInitSession(reactActivity, referralInitListener);
-    }
-
     public static void initSession(final Uri uri, Activity reactActivity, Branch.BranchUniversalReferralInitListener anInitListener) {
-        initListener = anInitListener;
+        initListener = new WeakReference<>(anInitListener);
         initSession(uri, reactActivity);
     }
 
-    public static void initSession(final Uri uri, Activity reactActivity) {
+    public static void initSession(final Uri uri, final Activity reactActivity) {
         Branch branch = setupBranch(reactActivity.getApplicationContext());
 
         mActivity = reactActivity;
-        referralInitListener = new Branch.BranchReferralInitListener(){
+        branch.initSession(new Branch.BranchReferralInitListener(){
 
             private Activity mmActivity = null;
 
@@ -176,9 +151,63 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
                 LinkProperties linkProperties = LinkProperties.getReferredLinkProperties();
 
                 if (initListener != null) {
-                    initListener.onInitFinished(branchUniversalObject, linkProperties, error);
+                    Branch.BranchUniversalReferralInitListener listener = initListener.get();
+                    if (listener != null) listener.onInitFinished(branchUniversalObject, linkProperties, error);
                 }
+
+//                Events Sent to Google Firebase
+
+
+                        FirebaseAnalytics firebaseAnalytics = FirebaseAnalytics
+                                .getInstance(reactActivity.getApplicationContext());
+                        Bundle bundle = new Bundle();
+
+                        try {
+                            bundle.putBoolean("clicked_branch_link", referringParams.getBoolean("+clicked_branch_link"));
+                        } catch(Exception e) {
+                            bundle.putBoolean("clicked_branch_link", false);
+                        }
+
+                        try {
+                            bundle.putString("referring_link", referringParams.getString("~referring_link"));
+                        } catch (Exception e) {
+                            bundle.putString("referring_link", "");
+
+                        }
+
+                        try {
+                            bundle.putString("non_branch_link", referringParams.getString("+non_branch_link"));
+                        } catch(Exception e) {
+                            bundle.putString("non_branch_link", "");
+                        }
+
+                        firebaseAnalytics.logEvent("branch_details", bundle);
+
+
                 generateLocalBroadcast(referringParams, referringUri, branchUniversalObject, linkProperties, error);
+            }
+
+            private String sendWrapValue(JSONObject referringParams, String eventName, Boolean boolCheck ) {
+
+                try {
+
+                    if(boolCheck) {
+//                    boolean check
+                        return String.valueOf(referringParams.getBoolean(eventName));
+                    } else {
+//                    string check
+                            return referringParams.getString(eventName);
+                    }
+
+                } catch(Exception e) {
+                    if(boolCheck) {
+//                    boolean check
+                        return "false";
+                    } else {
+//                    string check
+                        return null;
+                    }
+                }
             }
 
             private Branch.BranchReferralInitListener init(Activity activity) {
@@ -215,9 +244,7 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
 
                 LocalBroadcastManager.getInstance(mmActivity).sendBroadcast(broadcastIntent);
             }
-        }.init(reactActivity);
-        
-        branch.initSession(referralInitListener, uri, reactActivity);
+        }.init(reactActivity), uri, reactActivity);
     }
 
     public static void setDebug() {
@@ -256,13 +283,13 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
 
         // Constants for use with userCompletedAction (deprecated)
 
-        // constants.put(ADD_TO_CART_EVENT, BranchEvent.ADD_TO_CART);
-        // constants.put(ADD_TO_WISHLIST_EVENT, BranchEvent.ADD_TO_WISH_LIST);
-        // constants.put(PURCHASED_EVENT, BranchEvent.PURCHASED);
-        // constants.put(PURCHASE_INITIATED_EVENT, BranchEvent.PURCHASE_STARTED);
-        // constants.put(REGISTER_VIEW_EVENT, BranchEvent.VIEW);
-        // constants.put(SHARE_COMPLETED_EVENT, BranchEvent.SHARE_COMPLETED);
-        // constants.put(SHARE_INITIATED_EVENT, BranchEvent.SHARE_STARTED);
+        constants.put(ADD_TO_CART_EVENT, BranchEvent.ADD_TO_CART);
+        constants.put(ADD_TO_WISHLIST_EVENT, BranchEvent.ADD_TO_WISH_LIST);
+        constants.put(PURCHASED_EVENT, BranchEvent.PURCHASED);
+        constants.put(PURCHASE_INITIATED_EVENT, BranchEvent.PURCHASE_STARTED);
+        constants.put(REGISTER_VIEW_EVENT, BranchEvent.VIEW);
+        constants.put(SHARE_COMPLETED_EVENT, BranchEvent.SHARE_COMPLETED);
+        constants.put(SHARE_INITIATED_EVENT, BranchEvent.SHARE_STARTED);
 
         // constants for use with BranchEvent
 
@@ -358,12 +385,9 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
     }
 
     @ReactMethod
-    public void getLatestReferringParams(boolean synchronous, Promise promise) {
+    public void getLatestReferringParams(Promise promise) {
         Branch branch = Branch.getInstance();
-        if (synchronous)
-            promise.resolve(convertJsonToMap(branch.getLatestReferringParamsSync()));
-        else
-            promise.resolve(convertJsonToMap(branch.getLatestReferringParams()));
+        promise.resolve(convertJsonToMap(branch.getLatestReferringParams()));
     }
 
     @ReactMethod
@@ -554,7 +578,7 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
                         promise.reject("RNBranch::Error::DuplicateResourceError", error.getMessage());
                     }
                     else {
-                        promise.reject(GENERIC_ERROR, error.getMessage());
+                        promise.reject("RNBranch::Error", error.getMessage());
                     }
                     return;
                 }
@@ -933,12 +957,12 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
                     ReadableArray result = convertJsonToArray(list);
                     this._promise.resolve(result);
                 } catch (JSONException err) {
-                    this._promise.reject(GENERIC_ERROR, err.getMessage());
+                    this._promise.reject(err.getMessage());
                 }
             } else {
                 String errorMessage = error.getMessage();
                 Log.d(REACT_CLASS, errorMessage);
-                this._promise.reject(GENERIC_ERROR, errorMessage);
+                this._promise.reject(errorMessage);
             }
         }
     }
@@ -960,7 +984,7 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
             } else {
                 String errorMessage = error.getMessage();
                 Log.d(REACT_CLASS, errorMessage);
-                this._promise.reject(GENERIC_ERROR, errorMessage);
+                this._promise.reject(errorMessage);
             }
         }
     }
@@ -990,7 +1014,7 @@ public class RNBranchModule extends ReactContextBaseJavaModule {
             } else {
                 String errorMessage = error.getMessage();
                 Log.d(REACT_CLASS, errorMessage);
-                this._promise.reject(GENERIC_ERROR, errorMessage);
+                this._promise.reject(errorMessage);
             }
         }
     }
